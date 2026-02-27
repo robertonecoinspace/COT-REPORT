@@ -4,11 +4,10 @@ import requests
 import zipfile
 import io
 
-st.set_page_config(page_title="COT Analytics Pro", layout="wide")
+st.set_page_config(page_title="COT Analytics Pro 2026", layout="wide")
 
 @st.cache_data(ttl=3600)
 def get_cot_data():
-    # Carichiamo gli ultimi 3 anni per garantire la presenza di dati storici
     years = [2026, 2025, 2024]
     categories = {
         "Valute": "https://www.cftc.gov/files/dea/history/fut_fin_txt_{}.zip",
@@ -34,118 +33,96 @@ def get_cot_data():
 def process_market_with_history(df, search_term, is_commodity=False):
     if df is None: return None, None
     
-    # Filtro flessibile per trovare l'asset
+    # Filtro asset
     m = df[df['Market_and_Exchange_Names'].str.contains(search_term, case=False, na=False)].copy()
     if m.empty: return None, None
     
-    # Pulizia Date
-    date_col = [c for c in m.columns if 'Report_Date' in c][0]
+    # Identificazione colonna data
+    date_cols = [c for c in m.columns if 'Report_Date' in c]
+    if not date_cols: return None, None
+    date_col = date_cols[0]
     m[date_col] = pd.to_datetime(m[date_col])
     m = m.sort_values(date_col).drop_duplicates(subset=[date_col], keep='last')
     
-    # Mapping Colonne
+    # Selezione colonne in base al tipo di report (TFF per valute, Disaggregated per comm)
     if is_commodity:
-        s_long, s_short = 'Managed_Money_Positions_Long_All', 'Managed_Money_Positions_Short_All'
-        c_long, c_short = 'Prod_Merc_Positions_Long_All', 'Prod_Merc_Positions_Short_All'
+        cols = ['Managed_Money_Positions_Long_All', 'Managed_Money_Positions_Short_All', 
+                'Prod_Merc_Positions_Long_All', 'Prod_Merc_Positions_Short_All']
     else:
-        s_long, s_short = 'Leveraged_Money_Positions_Long_All', 'Leveraged_Money_Positions_Short_All'
-        c_long, c_short = 'Dealer_Positions_Long_All', 'Dealer_Positions_Short_All'
+        cols = ['Leveraged_Money_Positions_Long_All', 'Leveraged_Money_Positions_Short_All', 
+                'Dealer_Positions_Long_All', 'Dealer_Positions_Short_All']
 
-    # Calcolo Posizioni Nette e Index
-    m['S_Net'] = pd.to_numeric(m[s_long], errors='coerce') - pd.to_numeric(m[s_short], errors='coerce')
-    m['C_Net'] = pd.to_numeric(m[c_long], errors='coerce') - pd.to_numeric(m[c_short], errors='coerce')
+    # Controllo di sicurezza: se mancano le colonne, scarta l'asset
+    if not all(c in m.columns for c in cols[:2]):
+        return None, None
+
+    # Calcolo Posizioni Nette
+    m['S_Net'] = pd.to_numeric(m[cols[0]], errors='coerce').fillna(0) - pd.to_numeric(m[cols[1]], errors='coerce').fillna(0)
     
-    # Calcolo dell'indice mobile (rolling) per il grafico
-    def calculate_rolling_idx(series):
-        return series.rolling(window=52).apply(lambda x: (x[-1] - x.min()) / (x.max() - x.min()) * 100 if x.max() != x.min() else 50)
+    # Calcolo Index Mobile
+    def calc_idx(series):
+        win = series.tail(52)
+        if win.max() == win.min(): return 50.0
+        return ((series.iloc[-1] - win.min()) / (win.max() - win.min())) * 100
 
-    m['Spec_Index_Hist'] = calculate_rolling_idx(m['S_Net'])
+    # Generazione storica per grafico
+    m['Spec_Index_Hist'] = m['S_Net'].rolling(window=52).apply(
+        lambda x: (x[-1] - x.min()) / (x.max() - x.min()) * 100 if x.max() != x.min() else 50
+    )
     
     summary = {
-        "Asset": search_term.upper(), 
-        "Spec_Index": round(m['Spec_Index_Hist'].iloc[-1], 1),
-        "Comm_Index": round(((m['C_Net'].iloc[-1] - m['C_Net'].tail(52).min()) / (m['C_Net'].tail(52).max() - m['C_Net'].tail(52).min()) * 100), 1),
+        "Asset": search_term.replace(" -", ""), 
+        "Spec_Index": round(m['Spec_Index_Hist'].iloc[-1], 1) if not pd.isna(m['Spec_Index_Hist'].iloc[-1]) else 50.0,
         "Ultima Data": m[date_col].iloc[-1].strftime('%d/%m/%Y')
     }
     
     return summary, m[[date_col, 'Spec_Index_Hist']].set_index(date_col)
 
-# --- APP ---
-st.title("📊 COT Report Advanced Analytics")
+# --- UI ---
+st.title("📊 COT Report Analytics 2026")
 df_v, df_c = get_cot_data()
 
 v_list = ["EURO FX", "BRITISH POUND", "JAPANESE YEN", "CANADIAN DOLLAR", "SWISS FRANC"]
 c_list = ["GOLD -", "CRUDE OIL", "COPPER -", "NATURAL GAS", "SILVER -"]
 
-# Layout Tabelle
 t1, t2 = st.columns(2)
 with t1:
-    st.subheader("💱 Forex Sentiment")
-    v_summaries = []
+    st.subheader("💱 Valute")
+    v_summs = []
     for v in v_list:
         s, _ = process_market_with_history(df_v, v)
-        if s: v_summaries.append(s)
-    if v_summaries: st.dataframe(pd.DataFrame(v_summaries), hide_index=True)
-    else: st.warning("Dati valute in aggiornamento...")
+        if s: v_summs.append(s)
+    if v_summs: st.table(pd.DataFrame(v_summs))
+    else: st.warning("Dati valute non disponibili (Verifica report TFF)")
 
 with t2:
-    st.subheader("📦 Commodities Sentiment")
-    c_summaries = []
+    st.subheader("📦 Commodities")
+    c_summs = []
     for c in c_list:
         s, _ = process_market_with_history(df_c, c, is_commodity=True)
-        if s: c_summaries.append(s)
-    if c_summaries: st.dataframe(pd.DataFrame(c_summaries), hide_index=True)
-    else: st.info("Dati commodities non trovati. Prova a ricaricare tra poco.")
+        if s: c_summs.append(s)
+    if c_summs: st.table(pd.DataFrame(c_summs))
+    else: st.warning("Dati commodities non disponibili (Verifica report Disaggregated)")
 
-# --- SEZIONE GRAFICI ---
 st.divider()
-st.header("📈 Analisi Storica Speculatori (Ultimi 2 anni)")
+
+# --- GRAFICI ---
+st.header("📈 Grafico Storico Speculatori")
 all_assets = v_list + c_list
-selected_asset = st.selectbox("Seleziona Asset per il grafico", all_assets)
+choice = st.selectbox("Seleziona asset:", all_assets)
 
-is_com = selected_asset in c_list
-df_to_use = df_c if is_com else df_v
-summary, history = process_market_with_history(df_to_use, selected_asset, is_commodity=is_com)
+target_df = df_c if choice in c_list else df_v
+is_c = choice in c_list
+s, hist = process_market_with_history(target_df, choice, is_commodity=is_c)
 
-if history is not None:
-    st.line_chart(history.tail(104)) # Mostra le ultime 104 settimane (2 anni)
-    st.caption(f"Il grafico mostra l'andamento del COT Index per {selected_asset}. Valori estremi (0 o 100) indicano potenziali punti di inversione.")
-
-# --- LEGENDA ---
-st.divider()
-st.subheader("📚 Legenda e Guida")
-c_l, c_r = st.columns(2)
-with c_l:
-    st.info("**S_Idx (Speculatori):** 100=Massimi acquisti annui, 0=Massimi saldi. Se > 95 o < 5, segnale contrarian.")
-with c_r:
-    st.warning("**C_Idx (Commercial):** Hedgers/Produttori. Solitamente si muovono in opposizione agli speculatori.")
-
-# --- LEGENDE UNITE ---
-st.divider()
-st.subheader("📚 Legenda e Guida all'Analisi")
-
-c_leg1, c_leg2 = st.columns(2)
-
-with c_leg1:
-    st.info("""
-    **Legenda Tecnica:**
-    - **Spec_Index (S_Idx):** Speculatori. 100=Massimi acquisti annui, 0=Massimi saldi.
-    - **Comm_Index (C_Idx):** Commercial. Solitamente opposto agli speculatori.
-    - **Contrarian:** Se Spec_Index > 95 o < 5, possibile inversione di trend.
-    """)
-
-with c_leg2:
-    st.warning("""
-    **Guida all'Interpretazione:**
-    1. **Spec_COT_Index (0-100%):** Rappresenta il posizionamento degli Hedge Funds. 
-       - Vicino a 100: Iper-comprato. 
-       - Vicino a 0: Iper-venduto.
-    2. **Comm_COT_Index:** Se Spec=90 e Comm=10, il trend è confermato da entrambi i lati.
-    3. **Crowded Trades:** Un valore di 95% suggerisce che la forza del trend potrebbe essere esaurita.
-    """)
+if hist is not None:
+    st.line_chart(hist.tail(104))
+    
+else:
+    st.error("Impossibile generare il grafico per questo asset.")
 
 st.divider()
-st.caption("Nota: I dati vengono aggiornati ogni venerdì sera dal server ufficiale CFTC.gov.")
+st.info("**Legenda:** Spec_Index > 90 (Iper-comprato), < 10 (Iper-venduto). Analisi basata su 52 settimane.")
 
 
 
