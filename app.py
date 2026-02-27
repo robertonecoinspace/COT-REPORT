@@ -25,26 +25,55 @@ def get_cot_data(year=2026):
 
 def process_market(df, name, is_commodity=False):
     if df is None: return None
+    
+    # Filtro per nome mercato
     m = df[df['Market_and_Exchange_Names'].str.contains(name, case=False, na=False)].copy()
     if m.empty: return None
-    m = m.sort_values('Report_Date_as_YYYY_MM_DD')
+    
+    # IDENTIFICAZIONE DINAMICA DELLA COLONNA DATA
+    # Cerchiamo una colonna che contenga 'Report_Date' nel nome
+    date_col = [c for c in m.columns if 'Report_Date' in c]
+    if not date_col:
+        return None
+    date_col = date_col[0]
+    
+    m = m.sort_values(date_col)
     
     if is_commodity:
+        # Report Disaggregated (Commodities)
         s_long, s_short = 'Managed_Money_Positions_Long_All', 'Managed_Money_Positions_Short_All'
         c_long, c_short = 'Prod_Merc_Positions_Long_All', 'Prod_Merc_Positions_Short_All'
     else:
+        # Report TFF (Valute)
         s_long, s_short = 'Leveraged_Money_Positions_Long_All', 'Leveraged_Money_Positions_Short_All'
         c_long, c_short = 'Dealer_Positions_Long_All', 'Dealer_Positions_Short_All'
+
+    # Verifica che le colonne esistano per evitare altri KeyError
+    if s_long not in m.columns: return None
 
     m['S_Net'] = m[s_long] - m[s_short]
     m['C_Net'] = m[c_long] - m[c_short]
     
     def get_idx(series):
         win = series.tail(52)
-        if win.max() == win.min(): return 50.0
+        if win.empty or win.max() == win.min(): return 50.0
         return round(((series.iloc[-1] - win.min()) / (win.max() - win.min())) * 100, 1)
 
     return {"Asset": name.split(' -')[0], "Spec_Index": get_idx(m['S_Net']), "Comm_Index": get_idx(m['C_Net'])}
+
+# --- AGGIORNAMENTO LOGICA DI GENERAZIONE LISTE ---
+# Sostituisci anche queste righe per efficienza:
+v_results_list = []
+for v in v_list:
+    res = process_market(df_v, v)
+    if res: v_results_list.append(res)
+val_res = pd.DataFrame(v_results_list)
+
+c_results_list = []
+for c in c_list:
+    res = process_market(df_c, c, is_commodity=True)
+    if res: c_results_list.append(res)
+com_res = pd.DataFrame(c_results_list)
 
 # --- LOGICA APP ---
 st.title("📊 COT Report Analytics Pro")
@@ -102,3 +131,4 @@ with c_leg2:
     2. **Comm_COT_Index:** Se Spec=90 e Comm=10, il trend è confermato da entrambi i lati.
     3. **Crowded Trades:** Un valore di 95% suggerisce che la forza del trend potrebbe essere esaurita.
     """)
+
