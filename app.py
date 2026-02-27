@@ -4,10 +4,12 @@ import requests
 import zipfile
 import io
 
-st.set_page_config(page_title="COT Analysis Tool 2026", layout="wide")
+st.set_page_config(page_title="COT Analytics Pro", layout="wide")
 
-@st.cache_data(ttl=3600) # Aggiorna ogni ora per beccare l'uscita del venerdì
-def get_cot_data(years=[2026, 2025]):
+@st.cache_data(ttl=3600)
+def get_cot_data():
+    # Estendiamo la ricerca agli ultimi 3 anni per sicurezza
+    years = [2026, 2025, 2024]
     categories = {
         "Valute": "https://www.cftc.gov/files/dea/history/fut_fin_txt_{}.zip",
         "Commodities": "https://www.cftc.gov/files/dea/history/fut_disagg_txt_{}.zip"
@@ -21,29 +23,31 @@ def get_cot_data(years=[2026, 2025]):
                 if r.status_code == 200:
                     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                         df_year = pd.read_csv(z.open(z.namelist()[0]), low_memory=False)
-                        final_dfs[cat].append(df_year)
+                        if not df_year.empty:
+                            final_dfs[cat].append(df_year)
             except: continue
     
-    combined_v = pd.concat(final_dfs["Valute"], ignore_index=True) if final_dfs["Valute"] else None
-    combined_c = pd.concat(final_dfs["Commodities"], ignore_index=True) if final_dfs["Commodities"] else None
-    return combined_v, combined_c
+    # Concateniamo i dati trovati
+    v_df = pd.concat(final_dfs["Valute"], ignore_index=True) if final_dfs["Valute"] else None
+    c_df = pd.concat(final_dfs["Commodities"], ignore_index=True) if final_dfs["Commodities"] else None
+    return v_df, c_df
 
 def process_market(df, search_term, is_commodity=False):
     if df is None: return None
     
-    # Filtro più permissivo
+    # Filtro flessibile per beccare i nomi corretti
     m = df[df['Market_and_Exchange_Names'].str.contains(search_term, case=False, na=False)].copy()
     if m.empty: return None
     
-    # Pulizia date
-    date_col = [c for c in m.columns if 'Report_Date' in c and 'YYYY_MM_DD' in c]
-    if not date_col: date_col = [c for c in m.columns if 'Report_Date' in c]
-    if not date_col: return None
+    # Identificazione colonna data
+    date_cols = [c for c in m.columns if 'Report_Date' in c]
+    if not date_cols: return None
+    date_col = date_cols[0]
     
-    date_col = date_col[0]
     m[date_col] = pd.to_datetime(m[date_col])
     m = m.sort_values(date_col).drop_duplicates(subset=[date_col], keep='last')
     
+    # Mapping colonne Speculatori/Commercial
     if is_commodity:
         s_long, s_short = 'Managed_Money_Positions_Long_All', 'Managed_Money_Positions_Short_All'
         c_long, c_short = 'Prod_Merc_Positions_Long_All', 'Prod_Merc_Positions_Short_All'
@@ -51,61 +55,76 @@ def process_market(df, search_term, is_commodity=False):
         s_long, s_short = 'Leveraged_Money_Positions_Long_All', 'Leveraged_Money_Positions_Short_All'
         c_long, c_short = 'Dealer_Positions_Long_All', 'Dealer_Positions_Short_All'
 
-    if s_long not in m.columns: return None
+    # Calcolo Net Position
+    try:
+        m['S_Net'] = pd.to_numeric(m[s_long], errors='coerce') - pd.to_numeric(m[s_short], errors='coerce')
+        m['C_Net'] = pd.to_numeric(m[c_long], errors='coerce') - pd.to_numeric(m[c_short], errors='coerce')
+        
+        def get_idx(series):
+            win = series.dropna().tail(52)
+            if win.empty or win.max() == win.min(): return 50.0
+            return round(((series.iloc[-1] - win.min()) / (win.max() - win.min())) * 100, 1)
 
-    m['S_Net'] = pd.to_numeric(m[s_long], errors='coerce') - pd.to_numeric(m[s_short], errors='coerce')
-    m['C_Net'] = pd.to_numeric(m[c_long], errors='coerce') - pd.to_numeric(m[c_short], errors='coerce')
-    
-    def get_idx(series):
-        win = series.dropna().tail(52)
-        if win.empty or win.max() == win.min(): return 50.0
-        return round(((series.iloc[-1] - win.min()) / (win.max() - win.min())) * 100, 1)
+        return {
+            "Asset": search_term, 
+            "Spec_Index": get_idx(m['S_Net']), 
+            "Comm_Index": get_idx(m['C_Net']),
+            "Data Report": m[date_col].iloc[-1].strftime('%d/%m/%Y')
+        }
+    except: return None
 
-    return {
-        "Asset": search_term, 
-        "Spec_Index": get_idx(m['S_Net']), 
-        "Comm_Index": get_idx(m['C_Net']),
-        "Ultima Data": m[date_col].iloc[-1].strftime('%Y-%m-%d')
-    }
-
-# --- APP ---
+# --- UI STREAMLIT ---
 st.title("📊 COT Report Analytics Pro")
-df_v, df_c = get_cot_data([2026, 2025])
+st.caption("Analisi basata sui dati ufficiali CFTC (Aggiornata all'ultimo report disponibile)")
 
-# Liste semplificate per il filtro
+df_v, df_c = get_cot_data()
+
+# Liste di ricerca semplificate
 v_list = ["EURO", "POUND", "YEN", "CANADIAN", "SWISS", "ZEALAND"]
 c_list = ["GOLD", "CRUDE OIL", "COPPER", "NATURAL GAS"]
 
-col1, col2 = st.columns(2)
+c1, c2 = st.columns(2)
 
-with col1:
-    st.header("💱 Valute (G10)")
-    v_res_list = [process_market(df_v, v) for v in v_list if process_market(df_v, v)]
-    if v_res_list:
-        val_res = pd.DataFrame(v_res_list)
-        st.table(val_res)
-    else: st.warning("In attesa dei dati dalle 21:30...")
+with c1:
+    st.subheader("💱 Valute")
+    v_data = [process_market(df_v, v) for v in v_list if process_market(df_v, v)]
+    if v_data:
+        val_res = pd.DataFrame(v_data)
+        st.dataframe(val_res, use_container_width=True, hide_index=True)
+    else: st.warning("Dati valute in fase di caricamento dal server...")
 
-with col2:
-    st.header("📦 Commodities")
-    c_res_list = [process_market(df_c, c, True) for c in c_list if process_market(df_c, c, True)]
-    if c_res_list:
-        com_res = pd.DataFrame(c_res_list)
-        st.table(com_res)
-    else: st.warning("Dati Commodities non trovati.")
+with c2:
+    st.subheader("📦 Commodities")
+    c_data = [process_market(df_c, c, True) for c in c_list if process_market(df_c, c, True)]
+    if c_data:
+        com_res = pd.DataFrame(c_data)
+        st.dataframe(com_res, use_container_width=True, hide_index=True)
+    else: st.warning("Dati commodities non trovati.")
 
-# Forza Relativa e Legende rimangono uguali...
+# Forza Relativa
 if 'val_res' in locals() and not val_res.empty:
     st.divider()
     st.header("⚖️ Analisi Forza Relativa")
-    v1 = st.selectbox("Seleziona Valuta 1", val_res['Asset'].unique(), key="v1")
-    v2 = st.selectbox("Seleziona Valuta 2", val_res['Asset'].unique(), index=1, key="v2")
+    v1 = st.selectbox("Valuta 1", val_res['Asset'].unique())
+    v2 = st.selectbox("Valuta 2", val_res['Asset'].unique(), index=1)
+    
     idx1 = val_res[val_res['Asset'] == v1]['Spec_Index'].values[0]
     idx2 = val_res[val_res['Asset'] == v2]['Spec_Index'].values[0]
-    st.metric(f"Diff. {v1}/{v2}", f"{round(idx1-idx2, 1)} pts")
+    
+    st.metric(f"Spread {v1}/{v2}", f"{round(idx1 - idx2, 1)} pts")
 
+# Legende Unite
 st.divider()
-st.info("**LEGGENDA:** S_Idx (Speculatori) > 95 o < 5 = Segnale Contrarian (Possibile Inversione).")
+with st.expander("📚 GUIDA E LEGENDA (Clicca per espandere)"):
+    st.write("""
+    **S_Idx (Spec_Index):** Indica il posizionamento degli Hedge Funds. 
+    - Sopra 90: Iper-comprato (Attenzione inversione). 
+    - Sotto 10: Iper-venduto.
+    
+    **C_Idx (Comm_Index):** Indica gli Hedgers (Commerciali). Solitamente opposto agli speculatori.
+    
+    **Differenziale:** Un differenziale elevato tra due valute (es. +70) suggerisce una forte divergenza macroeconomica.
+    """)
 
 # --- LEGENDE UNITE ---
 st.divider()
@@ -133,6 +152,7 @@ with c_leg2:
 
 st.divider()
 st.caption("Nota: I dati vengono aggiornati ogni venerdì sera dal server ufficiale CFTC.gov.")
+
 
 
 
