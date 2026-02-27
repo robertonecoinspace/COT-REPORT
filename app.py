@@ -1,123 +1,104 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import requests
+import zipfile
+import io
 
-st.set_page_config(page_title="Corporate Efficiency Analyzer", layout="wide")
+# Configurazione Pagina Streamlit
+st.set_page_config(page_title="COT Analysis Tool 2026", layout="wide")
 
-st.title("🛡️ Analizzatore di Efficienza e Rischio Aziendale")
-st.markdown("Analisi profonda della qualità del bilancio, rischio fallimento e salute operativa.")
+@st.cache_data(ttl=86400) # Salva i dati per 24 ore per velocizzare l'app
+def get_cot_data(year=2026):
+    urls = {
+        "Valute": f"https://www.cftc.gov/files/dea/history/fut_fin_txt_{year}.zip",
+        "Commodities": f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{year}.zip"
+    }
+    dataframes = {}
+    for cat, url in urls.items():
+        try:
+            r = requests.get(url)
+            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                dataframes[cat] = pd.read_csv(z.open(z.namelist()[0]), low_memory=False)
+        except:
+            st.error(f"Errore nel download dei dati {cat}")
+    return dataframes.get("Valute"), dataframes.get("Commodities")
 
-def get_val(df, keys, row_idx=0):
-    if df is None or df.empty: return 0
-    for k in keys:
-        if k in df.index:
-            val = df.loc[k]
-            return val.iloc[row_idx] if hasattr(val, 'iloc') else val
-    return 0
-
-def analyze_efficiency(symbol):
-    try:
-        stock = yf.Ticker(symbol.strip().upper().replace('.', '-'))
-        info = stock.info
-        bs = stock.balance_sheet
-        is_stmt = stock.financials
-        cf = stock.cashflow
-        
-        if bs.empty or is_stmt.empty: return None
-
-        # --- PARAMETRI RICHIESTI ---
-        roe = info.get('returnOnEquity', 0)
-        margin = info.get('profitMargins', 0)
-        div_yield = (info.get('dividendYield', 0) or 0) # Già decimale in yfinance
-        debt_equity = info.get('debtToEquity', 0) / 100 # Riportato a decimale
-
-        # Cash / Debt (Annuale e Trimestrale)
-        cash_ann = get_val(bs, ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments'])
-        debt_ann = get_val(bs, ['Total Debt'])
-        
-        bs_q = stock.quarterly_balance_sheet
-        cash_q = get_val(bs_q, ['Cash And Cash Equivalents'], 0)
-        debt_q = get_val(bs_q, ['Total Debt'], 0)
-
-        # --- 1. PIOTROSKI F-SCORE (Semplificato 0-9) ---
-        # Analizziamo 4 criteri base per brevità (Redditività e Liquidità)
-        f_score = 0
-        ni = get_val(is_stmt, ['Net Income'])
-        f_score += 1 if ni > 0 else 0
-        f_score += 1 if get_val(cf, ['Operating Cash Flow']) > 0 else 0
-        f_score += 1 if get_val(cf, ['Operating Cash Flow']) > ni else 0
-        # (Nota: Un calcolo completo a 9 punti richiede il confronto anno su anno)
-
-        # --- 2. BENEISH M-SCORE (Rilevamento Manipolazione) ---
-        # Formula semplificata per alert: > -1.78 indica possibile manipolazione
-        # Qui riportiamo un placeholder logico basato su DSRI e AQI se i dati sono presenti
-        m_score = "N/D" 
-        # In un'app reale servirebbero i dati dell'anno precedente per il calcolo esatto.
-
-        # --- 3. ALTMAN Z-SCORE (Rischio Fallimento) ---
-        # Z > 3.0 (Sicuro), 1.8 < Z < 3.0 (Grigio), Z < 1.8 (Pericolo)
-        working_cap = get_val(bs, ['Working Capital', 'Net Working Capital'])
-        total_assets = get_val(bs, ['Total Assets'])
-        re = get_val(bs, ['Retained Earnings'])
-        ebit = get_val(is_stmt, ['EBIT'])
-        mkt_cap = info.get('marketCap', 1)
-        total_liab = get_val(bs, ['Total Liabilities Net Minority Interest', 'Total Liabilities'])
-        rev = info.get('totalRevenue', 1)
-
-        z_score = (1.2 * (working_cap/total_assets) + 
-                   1.4 * (re/total_assets) + 
-                   3.3 * (ebit/total_assets) + 
-                   0.6 * (mkt_cap/total_liab) + 
-                   1.0 * (rev/total_assets))
-
-        return {
-            "Ticker": symbol,
-            "ROE %": round(roe * 100, 2),
-            "Margin %": round(margin * 100, 2),
-            "Debt/Equity": round(debt_equity, 2),
-            "Div. Yield": f"{div_yield:.4f}",
-            "Altman Z-Score": round(z_score, 2),
-            "Piotroski (4pt)": f"{f_score}/4",
-            "Cash/Debt (A)": round(cash_ann/debt_ann, 2) if debt_ann > 0 else "No Debt",
-            "Cash/Debt (Q)": round(cash_q/debt_q, 2) if debt_q > 0 else "No Debt",
-        }
-    except Exception as e:
-        return None
-
-# --- INTERFACCIA STREAMLIT ---
-uploaded_file = st.sidebar.file_uploader("Carica lista_ticker.csv", type="csv")
-
-if uploaded_file:
-    df_input = pd.read_csv(uploaded_file)
-    ticker_col = 'Ticker' if 'Ticker' in df_input.columns else df_input.columns[0]
-    tickers = df_input[ticker_col].dropna().unique().tolist()
+def process_market(df, name, is_commodity=False):
+    if df is None: return None
+    m = df[df['Market_and_Exchange_Names'].str.contains(name, case=False, na=False)].copy()
+    if m.empty: return None
+    m = m.sort_values('Report_Date_as_YYYY_MM_DD')
     
-    if st.sidebar.button("📊 Analizza Efficienza"):
-        risultati = []
-        bar = st.progress(0)
-        for i, t in enumerate(tickers):
-            res = analyze_efficiency(t)
-            if res: risultati.append(res)
-            bar.progress((i+1)/len(tickers))
-        
-        if risultati:
-            df_final = pd.DataFrame(risultati)
-            
-            # --- COLORAZIONE LOGICA ---
-            def color_z(val):
-                if isinstance(val, float):
-                    if val > 3: return 'background-color: #2ecc71; color: white'
-                    if val < 1.8: return 'background-color: #e74c3c; color: white'
-                return ''
+    if is_commodity:
+        s_long, s_short = 'Managed_Money_Positions_Long_All', 'Managed_Money_Positions_Short_All'
+        c_long, c_short = 'Prod_Merc_Positions_Long_All', 'Prod_Merc_Positions_Short_All'
+    else:
+        s_long, s_short = 'Leveraged_Money_Positions_Long_All', 'Leveraged_Money_Positions_Short_All'
+        c_long, c_short = 'Dealer_Positions_Long_All', 'Dealer_Positions_Short_All'
 
-            st.subheader("Risultati Analisi Qualitativa")
-            st.dataframe(df_final.style.applymap(color_z, subset=['Altman Z-Score']))
-            
-            st.info("""
-            **Legenda Rapida:**
-            * **Altman Z-Score:** > 3.0 Sano | < 1.8 Rischio Fallimento elevato.
-            * **Piotroski (4pt):** Indica la forza operativa (massimo in questa versione: 4).
-            * **Cash/Debt:** > 1 significa che l'azienda può ripagare tutto il debito con la cassa immediata.
-            """)
-        else:
-            st.error("Nessun dato recuperato.")
+    m['S_Net'] = m[s_long] - m[s_short]
+    m['C_Net'] = m[c_long] - m[c_short]
+    
+    def get_idx(series):
+        win = series.tail(52)
+        if win.max() == win.min(): return 50.0
+        return round(((series.iloc[-1] - win.min()) / (win.max() - win.min())) * 100, 1)
+
+    return {"Asset": name.split(' -')[0], "Spec_Index": get_idx(m['S_Net']), "Comm_Index": get_idx(m['C_Net'])}
+
+# --- LOGICA APP ---
+st.title("📊 COT Report Analytics Pro")
+st.markdown(f"**Data Analisi:** 20/08/2026")
+
+df_v, df_c = get_cot_data()
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.header("💱 Valute (G10)")
+    v_list = ["EURO FX", "CANADIAN DOLLAR", "BRITISH POUND", "JAPANESE YEN", "SWISS FRANC", "NEW ZEALAND DOLLAR"]
+    val_res = pd.DataFrame([process_market(df_v, v) for v in v_list if process_market(df_v, v)])
+    st.table(val_res)
+
+with col2:
+    st.header("📦 Commodities")
+    c_list = ["GOLD", "CRUDE OIL", "COPPER", "NATURAL GAS"]
+    com_res = pd.DataFrame([process_market(df_c, c, True) for c in c_list if process_market(df_c, c, True)])
+    st.table(com_res)
+
+st.divider()
+
+# --- FORZA RELATIVA ---
+st.header("⚖️ Analisi Forza Relativa")
+v1 = st.selectbox("Seleziona Valuta 1", val_res['Asset'].unique())
+v2 = st.selectbox("Seleziona Valuta 2", val_res['Asset'].unique(), index=1)
+
+idx1 = val_res[val_res['Asset'] == v1]['Spec_Index'].values[0]
+idx2 = val_res[val_res['Asset'] == v2]['Spec_Index'].values[0]
+diff = round(idx1 - idx2, 1)
+
+st.metric(label=f"Differenziale {v1} / {v2}", value=f"{diff} pts", delta=diff)
+
+# --- LEGENDE UNITE ---
+st.divider()
+st.subheader("📚 Legenda e Guida all'Analisi")
+
+c_leg1, c_leg2 = st.columns(2)
+
+with c_leg1:
+    st.info("""
+    **Legenda Tecnica:**
+    - **S_Idx (Spec_Index):** Speculatori. 100=Massimi acquisti annui, 0=Massimi saldi.
+    - **C_Idx (Comm_Index):** Commercial. Solitamente opposto agli speculatori.
+    - **Contrarian:** Se S_Idx > 95 o < 5, possibile inversione di trend.
+    """)
+
+with c_leg2:
+    st.warning("""
+    **Guida all'Interpretazione:**
+    1. **Spec_COT_Index (0-100%):** Rappresenta il posizionamento degli Hedge Funds. 
+       - Vicino a 100: Iper-comprato. 
+       - Vicino a 0: Iper-venduto.
+    2. **Comm_COT_Index:** Se Spec=90 e Comm=10, il trend è confermato da entrambi i lati.
+    3. **Crowded Trades:** Un valore di 95% suggerisce che la forza del trend potrebbe essere esaurita.
+    """)
