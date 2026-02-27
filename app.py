@@ -9,7 +9,7 @@ st.set_page_config(page_title="COT Analytics 2026 Pro", layout="wide")
 @st.cache_data(ttl=3600)
 def get_cot_data():
     # Proviamo a scaricare i file consolidati (storici + correnti)
-    years = [2026, 2025]
+    years = [2025]
     categories = {
         "Valute": "https://www.cftc.gov/files/dea/history/fut_fin_txt_{}.zip",
         "Commodities": "https://www.cftc.gov/files/dea/history/fut_disagg_txt_{}.zip"
@@ -116,6 +116,7 @@ st.sidebar.markdown("""
 2. **S_Idx < 10**: Sentiment estremo ribassista. Possibile rimbalzo.
 3. **Data**: Verifica sempre che la data sia l'ultima disponibile (venerdì sera esce il nuovo report).
 """)
+
 
 
 
