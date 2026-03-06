@@ -1,121 +1,174 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import requests
-import zipfile
-import io
 
-st.set_page_config(page_title="COT Analytics 2026 Pro", layout="wide")
+# --- CONFIGURAZIONE SOGLIE E LOGICHE ---
+# mode: direct (alto è bene), inverse (basso è bene), range (tra min e max è bene)
+SOGLIE = {
+    "TECH": {
+        "Revenue Growth (%)": {"v": 20, "g": 5, "mode": "direct"},
+        "PEG Ratio": {"v": 1.2, "g": 2.5, "mode": "inverse"},
+        "Operating Margin (%)": {"v": 25, "g": 10, "mode": "direct"},
+        "Beta": {"v": 1.3, "g": 0.9, "mode": "direct"}
+    },
+    "FINANCIAL": {
+        "Price to Book": {"v": 1.5, "g": 2.2, "mode": "range", "min_v": 0.8},
+        "Efficiency Ratio (%)": {"v": 50, "g": 65, "mode": "inverse"},
+        "Equity/Assets Ratio": {"v": 0.15, "g": 0.08, "mode": "direct"},
+        "Beta": {"v": 1.2, "g": 0.8, "mode": "direct"}
+    },
+    "ENERGY": {
+        "Net Debt / EBITDA": {"v": 1.5, "g": 3.0, "mode": "inverse"},
+        "FCF Yield (%)": {"v": 8, "g": 4, "mode": "direct"},
+        "EV / EBITDA": {"v": 6, "g": 10, "mode": "inverse"}
+    },
+    "RETAIL": {
+        "Gross Margin (%)": {"v": 40, "g": 20, "mode": "direct"},
+        "Quick Ratio": {"v": 1.2, "g": 0.8, "mode": "direct"},
+        "Inventory Turnover": {"v": 10, "g": 5, "mode": "direct"}
+    }
+}
+
+# --- FUNZIONI DI CALCOLO ---
+def get_color(val, soglia_dict):
+    mode = soglia_dict["mode"]
+    if mode == "direct":
+        if val >= soglia_dict["v"]: return "🟢"
+        if val >= soglia_dict["g"]: return "🟡"
+        return "🔴"
+    elif mode == "inverse":
+        if val <= soglia_dict["v"]: return "🟢"
+        if val <= soglia_dict["g"]: return "🟡"
+        return "🔴"
+    elif mode == "range":
+        if soglia_dict["min_v"] <= val <= soglia_dict["v"]: return "🟢"
+        if val <= soglia_dict["g"]: return "🟡"
+        return "🔴"
+    return "⚪"
+
+def safe_div(n, d):
+    return n / d if d and d != 0 else 0
 
 @st.cache_data(ttl=3600)
-def get_cot_data():
-    # Proviamo a scaricare i file consolidati (storici + correnti)
-    years = [2025]
-    categories = {
-        "Valute": "https://www.cftc.gov/files/dea/history/fut_fin_txt_{}.zip",
-        "Commodities": "https://www.cftc.gov/files/dea/history/fut_disagg_txt_{}.zip"
-    }
-    final_dfs = {"Valute": [], "Commodities": []}
+def fetch_and_analyze(ticker, sector):
+    try:
+        stock = yf.Ticker(ticker)
+        q_fin = stock.quarterly_financials
+        q_bs = stock.quarterly_balance_sheet
+        q_cf = stock.quarterly_cashflow
+        info = stock.info
+
+        def get_val(df, row, idx=0):
+            if df is not None and row in df.index and len(df.columns) > idx:
+                return df.loc[row].iloc[idx]
+            return 0
+
+        res = {}
+
+        if sector == "TECH":
+            # Revenue Growth
+            rev0, rev1 = get_val(q_fin, 'Total Revenue', 0), get_val(q_fin, 'Total Revenue', 1)
+            growth = safe_div(rev0 - rev1, abs(rev1)) * 100
+            # Margins
+            op0, op1 = get_val(q_fin, 'Operating Income', 0), get_val(q_fin, 'Operating Income', 1)
+            m0, m1 = safe_div(op0, rev0) * 100, safe_div(op1, rev1) * 100
+            
+            res["Revenue Growth (%)"] = (growth, 0) # Ticker info growth non ha T1 diretto qui
+            res["PEG Ratio"] = (info.get('pegRatio', 0), 0)
+            res["Operating Margin (%)"] = (m0, m0 - m1)
+            res["Beta"] = (info.get('beta', 1), 0)
+
+        elif sector == "FINANCIAL":
+            # Efficiency Ratio
+            opex0, opex1 = get_val(q_fin, 'Operating Expense', 0), get_val(q_fin, 'Operating Expense', 1)
+            rev0, rev1 = get_val(q_fin, 'Total Revenue', 0), get_val(q_fin, 'Total Revenue', 1)
+            eff0, eff1 = safe_div(opex0, rev0) * 100, safe_div(opex1, rev1) * 100
+            # Equity/Assets
+            eq0, eq1 = get_val(q_bs, 'Stockholders Equity', 0), get_val(q_bs, 'Stockholders Equity', 1)
+            as0, as1 = get_val(q_bs, 'Total Assets', 0), get_val(q_bs, 'Total Assets', 1)
+            ea0, ea1 = safe_div(eq0, as0), safe_div(eq1, as1)
+
+            res["Price to Book"] = (info.get('priceToBook', 0), 0)
+            res["Efficiency Ratio (%)"] = (eff0, eff0 - eff1)
+            res["Equity/Assets Ratio"] = (ea0, ea0 - ea1)
+            res["Beta"] = (info.get('beta', 1), 0)
+
+        elif sector == "ENERGY":
+            ebitda0, ebitda1 = info.get('ebitda', 1), 1 # EBITDA T1 difficile da info
+            debt0, cash0 = info.get('totalDebt', 0), info.get('totalCash', 0)
+            nd_ebitda = safe_div(debt0 - cash0, ebitda0)
+            fcf0, fcf1 = get_val(q_cf, 'Free Cash Flow', 0), get_val(q_cf, 'Free Cash Flow', 1)
+            yield0 = safe_div(fcf0, info.get('marketCap', 1)) * 100
+            yield1 = safe_div(fcf1, info.get('marketCap', 1)) * 100
+
+            res["Net Debt / EBITDA"] = (nd_ebitda, 0)
+            res["FCF Yield (%)"] = (yield0, yield0 - yield1)
+            res["EV / EBITDA"] = (info.get('enterpriseToEbitda', 0), 0)
+
+        elif sector == "RETAIL":
+            # Gross Margin
+            rev0, rev1 = get_val(q_fin, 'Total Revenue', 0), get_val(q_fin, 'Total Revenue', 1)
+            gp0, gp1 = get_val(q_fin, 'Gross Profit', 0), get_val(q_fin, 'Gross Profit', 1)
+            gm0, gm1 = safe_div(gp0, rev0) * 100, safe_div(gp1, rev1) * 100
+            # Quick Ratio
+            ca0, ca1 = get_val(q_bs, 'Total Current Assets', 0), get_val(q_bs, 'Total Current Assets', 1)
+            inv0, inv1 = get_val(q_bs, 'Inventory', 0), get_val(q_bs, 'Inventory', 1)
+            cl0, cl1 = get_val(q_bs, 'Total Current Liabilities', 0), get_val(q_bs, 'Total Current Liabilities', 1)
+            qr0, qr1 = safe_div(ca0 - inv0, cl0), safe_div(ca1 - inv1, cl1)
+
+            res["Gross Margin (%)"] = (gm0, gm0 - gm1)
+            res["Quick Ratio"] = (qr0, qr0 - qr1)
+            res["Inventory Turnover"] = (safe_div(abs(get_val(q_fin, 'Cost Of Revenue', 0)), inv0), 0)
+
+        return res
+    except Exception as e:
+        st.error(f"Errore tecnico su {ticker}: {e}")
+        return None
+
+# --- UI STREAMLIT ---
+st.set_page_config(page_title="Trading Sector Analyzer", layout="wide")
+st.title("📊 Terminale Analisi Settoriale")
+st.markdown("Analisi fondamentale e di trend per trading di breve termine.")
+
+# Sidebar per caricamento
+with st.sidebar:
+    st.header("⚙️ Configurazione")
+    uploaded_file = st.file_uploader("Carica CSV (colonne: ticker, sector)", type="csv")
+    st.info("Esempio CSV:\nticker,sector\nNVDA,TECH\nSCHW,FINANCIAL")
+
+if uploaded_file:
+    df_stocks = pd.read_csv(uploaded_file)
+    selected_sectors = st.multiselect("Filtra Settori", df_stocks['sector'].unique(), default=df_stocks['sector'].unique())
     
-    for cat, url_template in categories.items():
-        for year in years:
-            try:
-                r = requests.get(url_template.format(year), timeout=15)
-                if r.status_code == 200:
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                        for filename in z.namelist():
-                            if filename.endswith('.txt') or filename.endswith('.csv'):
-                                with z.open(filename) as f:
-                                    df_temp = pd.read_csv(f, low_memory=False)
-                                    final_dfs[cat].append(df_temp)
-            except: continue
-    
-    v_df = pd.concat(final_dfs["Valute"], ignore_index=True) if final_dfs["Valute"] else None
-    c_df = pd.concat(final_dfs["Commodities"], ignore_index=True) if final_dfs["Commodities"] else None
-    return v_df, c_df
+    filtered_df = df_stocks[df_stocks['sector'].isin(selected_sectors)]
 
-def process_market(df, search_term, is_commodity=False):
-    if df is None: return None, None
-    
-    # Filtro flessibile: cerchiamo la parola chiave
-    m = df[df['Market_and_Exchange_Names'].str.contains(search_term, case=False, na=False)].copy()
-    if m.empty: return None, None
-    
-    # Identificazione colonna data
-    date_cols = [c for c in m.columns if 'Report_Date' in c]
-    if not date_cols: return None, None
-    date_col = date_cols[0]
-    m[date_col] = pd.to_datetime(m[date_col])
-    m = m.sort_values(date_col).drop_duplicates(subset=[date_col], keep='last')
-    
-    # Mapping Colonne
-    if is_commodity:
-        cols = ['Managed_Money_Positions_Long_All', 'Managed_Money_Positions_Short_All', 'Prod_Merc_Positions_Long_All', 'Prod_Merc_Positions_Short_All']
-    else:
-        cols = ['Leveraged_Money_Positions_Long_All', 'Leveraged_Money_Positions_Short_All', 'Dealer_Positions_Long_All', 'Dealer_Positions_Short_All']
-
-    if not all(c in m.columns for c in cols[:2]): return None, None
-
-    # Calcolo Net e Index
-    m['S_Net'] = pd.to_numeric(m[cols[0]], errors='coerce').fillna(0) - pd.to_numeric(m[cols[1]], errors='coerce').fillna(0)
-    
-    def get_idx(series):
-        win = series.tail(52)
-        if win.max() == win.min(): return 50.0
-        return round(((series.iloc[-1] - win.min()) / (win.max() - win.min())) * 100, 1)
-
-    m['Spec_Index_Hist'] = m['S_Net'].rolling(window=52).apply(lambda x: (x[-1] - x.min()) / (x.max() - x.min()) * 100 if x.max() != x.min() else 50)
-    
-    summary = {
-        "Asset": search_term.upper(), 
-        "S_Idx": get_idx(m['S_Net']),
-        "Data": m[date_col].iloc[-1].strftime('%d/%m/%Y')
-    }
-    return summary, m[[date_col, 'Spec_Index_Hist']].set_index(date_col)
-
-# --- UI ---
-st.title("📊 COT Analytics - Dashboard Strategica")
-df_v, df_c = get_cot_data()
-
-# Liste di ricerca ottimizzate
-v_list = ["EURO FX", "BRITISH POUND", "JAPANESE YEN", "CANADIAN DOLLAR", "SWISS FRANC"]
-c_list = ["GOLD", "CRUDE OIL", "COPPER", "NATURAL GAS"]
-
-c1, c2 = st.columns(2)
-
-with c1:
-    st.subheader("💱 Valute")
-    v_data = [process_market(df_v, v)[0] for v in v_list if process_market(df_v, v)[0]]
-    if v_data: st.table(pd.DataFrame(v_data))
-    else: st.error("Database Valute non filtrabile. Riprova più tardi.")
-
-with c2:
-    st.subheader("📦 Commodities")
-    c_data = [process_market(df_c, c, True)[0] for c in c_list if process_market(df_c, c, True)[0]]
-    if c_data: st.table(pd.DataFrame(c_data))
-    else: st.error("Database Commodities non filtrabile.")
-
-st.divider()
-
-# --- GRAFICO ---
-st.header("📈 Analisi Trend Speculatori")
-all_assets = v_list + c_list
-choice = st.selectbox("Scegli asset:", all_assets)
-is_c = choice in c_list
-target_df = df_c if is_c else df_v
-summ, hist = process_market(target_df, choice, is_commodity=is_c)
-
-if hist is not None:
-    st.line_chart(hist.tail(104))
-    
+    for _, row in filtered_df.iterrows():
+        ticker, sector = row['ticker'].upper(), row['sector'].upper()
+        
+        with st.expander(f"📈 {ticker} - Settore: {sector}", expanded=True):
+            data = fetch_and_analyze(ticker, sector)
+            
+            if data:
+                cols = st.columns(len(data))
+                for i, (name, values) in enumerate(data.items()):
+                    val, delta = values
+                    soglia_cfg = SOGLIE[sector].get(name, {"v":0, "g":0, "mode":"direct"})
+                    color_icon = get_color(val, soglia_cfg)
+                    
+                    # Logica colore freccia
+                    d_color = "normal" if soglia_cfg["mode"] in ["direct", "range"] else "inverse"
+                    
+                    cols[i].metric(
+                        label=f"{color_icon} {name}",
+                        value=f"{val:.2f}",
+                        delta=f"{delta:.2f}" if delta != 0 else None,
+                        delta_color=d_color
+                    )
+            else:
+                st.warning(f"Dati non disponibili per {ticker}")
 else:
-    st.info("Seleziona un asset per visualizzare lo storico.")
+    st.warning("Per favore, carica un file CSV per iniziare l'analisi.")
 
-st.sidebar.markdown("""
-### 💡 Guida Rapida
-1. **S_Idx > 90**: Sentiment estremo rialzista. Spesso precede un'inversione (Analisi Contrarian).
-2. **S_Idx < 10**: Sentiment estremo ribassista. Possibile rimbalzo.
-3. **Data**: Verifica sempre che la data sia l'ultima disponibile (venerdì sera esce il nuovo report).
-""")
 
 
 
